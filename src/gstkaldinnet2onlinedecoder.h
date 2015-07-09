@@ -60,7 +60,9 @@ struct _Gstkaldinnet2onlinedecoder {
   GstCaps *sink_caps;
 
   gboolean silent;
+  gfloat traceback_period_secs;
   gboolean do_endpointing;
+  gboolean output_lattice;
   gboolean inverse_scale;
   float lmwt_scale;
   GstBufferSource *audio_source;

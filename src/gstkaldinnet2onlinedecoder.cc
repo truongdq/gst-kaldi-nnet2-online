@@ -70,6 +70,8 @@ enum {
   PROP_FST,
   PROP_WORD_SYMS,
   PROP_DO_ENDPOINTING,
+  PROP_TRACEBACK_PERIOD_SECS,
+  PROP_OUTPUT_LATTICE,
   PROP_ADAPTATION_STATE,
   PROP_INVERSE_SCALE,
   PROP_LMWT_SCALE,
@@ -182,6 +184,25 @@ static void gst_kaldinnet2onlinedecoder_class_init(
       g_param_spec_boolean(
           "do-endpointing", "If true, apply endpoint detection",
           "If true, apply endpoint detection, and split the audio at endpoints",
+          FALSE,
+          (GParamFlags) G_PARAM_READWRITE));
+
+  g_object_class_install_property(
+      gobject_class,
+      PROP_TRACEBACK_PERIOD_SECS,
+      g_param_spec_float(
+          "traceback-period", "float, number of second for traceback new lattices",
+          "The iterval to get a new lattice",
+          G_MINFLOAT,
+          G_MAXFLOAT,
+          1.0,
+          (GParamFlags) G_PARAM_READWRITE));
+  g_object_class_install_property(
+      gobject_class,
+      PROP_OUTPUT_LATTICE,
+      g_param_spec_boolean(
+          "output-lattice", "If true, output new lattice nodes for every frame",
+          "If true, output new lattice nodes for every frame",
           FALSE,
           (GParamFlags) G_PARAM_READWRITE));
 
@@ -428,6 +449,12 @@ static void gst_kaldinnet2onlinedecoder_set_property(GObject * object,
     case PROP_DO_ENDPOINTING:
       filter->do_endpointing = g_value_get_boolean(value);
       break;
+    case PROP_TRACEBACK_PERIOD_SECS:
+      filter->traceback_period_secs = g_value_get_float(value);
+      break;
+    case PROP_OUTPUT_LATTICE:
+      filter->output_lattice = g_value_get_boolean(value);
+      break;
     case PROP_INVERSE_SCALE:
       filter->inverse_scale = g_value_get_boolean(value);
       break;
@@ -541,6 +568,12 @@ static void gst_kaldinnet2onlinedecoder_get_property(GObject * object,
       break;
     case PROP_DO_ENDPOINTING:
       g_value_set_boolean(value, filter->do_endpointing);
+      break;
+    case PROP_TRACEBACK_PERIOD_SECS:
+      g_value_set_float(value, filter->traceback_period_secs);
+      break;
+    case PROP_OUTPUT_LATTICE:
+      g_value_set_boolean(value, filter->output_lattice);
       break;
     case PROP_INVERSE_SCALE:
       g_value_set_boolean(value, filter->inverse_scale);
@@ -692,6 +725,56 @@ static void gst_kaldinnet2onlinedecoder_partial_result(
   }
 }
 
+static void gst_kaldinnet2onlinedecoder_partial_lat_nodes(
+    Gstkaldinnet2onlinedecoder * filter, const CompactLattice clat) {
+    typedef CompactLatticeArc Arc; 
+    typedef typename Arc::StateId StateId;
+    std::stringstream sentence;
+    for (StateId s = 0; s < clat.NumStates(); s++){
+        for (fst::ArcIterator<fst::ExpandedFst<Arc> > iter(clat, s);
+         !iter.Done();
+         iter.Next()) {
+            const Arc &arc = iter.Value();
+            string olabel = filter->word_syms->Find(arc.olabel);
+            if (olabel == " "){
+                olabel = "<sil>";
+            }
+            sentence << s << " " << arc.nextstate << " ";
+            sentence << olabel << " ";
+            sentence << arc.weight << "|";
+        }
+    }
+    g_signal_emit(filter,
+                  gst_kaldinnet2onlinedecoder_signals[PARTIAL_RESULT_SIGNAL], 0,
+                  sentence.str().c_str());
+
+}
+
+static void gst_kaldinnet2onlinedecoder_partial_send_raw_lat_nodes(
+    Gstkaldinnet2onlinedecoder * filter, const Lattice clat) {
+    typedef LatticeArc Arc; 
+    typedef typename Arc::StateId StateId;
+    std::stringstream sentence;
+    for (StateId s = 0; s < clat.NumStates(); s++){
+        for (fst::ArcIterator<fst::ExpandedFst<Arc> > iter(clat, s);
+         !iter.Done();
+         iter.Next()) {
+            const Arc &arc = iter.Value();
+            string olabel = filter->word_syms->Find(arc.olabel);
+            if (olabel == " "){
+                olabel = "<sil>";
+            }
+            sentence << s << " " << arc.nextstate << " ";
+            sentence << olabel << " ";
+            sentence << arc.weight << "|";
+        }
+    }
+    g_signal_emit(filter,
+                  gst_kaldinnet2onlinedecoder_signals[PARTIAL_RESULT_SIGNAL], 0,
+                  sentence.str().c_str());
+
+}
+
 static bool gst_kaldinnet2onlinedecoder_rescore_big_lm(
     Gstkaldinnet2onlinedecoder * filter, CompactLattice &clat, CompactLattice &result_lat) {
 
@@ -752,7 +835,9 @@ static void gst_kaldinnet2onlinedecoder_loop(
     Gstkaldinnet2onlinedecoder * filter) {
 
   GST_DEBUG_OBJECT(filter, "Starting decoding loop..");
-  BaseFloat traceback_period_secs = 1.0;
+  BaseFloat traceback_period_secs = filter->traceback_period_secs;
+  if (traceback_period_secs == 0)
+      traceback_period_secs = 1.0;
 
   int32 chunk_length = int32(filter->sample_rate * filter->chunk_length_in_secs);
 
@@ -789,9 +874,18 @@ static void gst_kaldinnet2onlinedecoder_loop(
       }
       num_seconds_decoded += filter->chunk_length_in_secs;
       if (num_seconds_decoded - last_traceback > traceback_period_secs) {
+        CompactLattice clat;
         Lattice lat;
-        decoder.GetBestPath(false, &lat);
-        gst_kaldinnet2onlinedecoder_partial_result(filter, lat);
+        Lattice raw_lat;
+        if (filter->output_lattice){
+          //decoder.GetLattice(false, &clat);
+          //gst_kaldinnet2onlinedecoder_partial_lat_nodes(filter, clat);
+          decoder.GetRawLattice(false, &raw_lat);
+          gst_kaldinnet2onlinedecoder_partial_send_raw_lat_nodes(filter, raw_lat);
+        }else{
+          decoder.GetBestPath(false, &lat);
+          gst_kaldinnet2onlinedecoder_partial_result(filter, lat);
+        }
         last_traceback += traceback_period_secs;
       }
     }

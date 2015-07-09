@@ -1,0 +1,2 @@
+/project/nakamura-lab01/Work/truong-dq/tools/kaldi/kaldi-git2/src/online2/:
+    online-nnet2-decoding.h: Add GetRawLattice
